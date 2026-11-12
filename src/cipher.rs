@@ -35,39 +35,38 @@ fn index_of_92(byte: u8) -> Option<usize> {
 }
 
 /// Substitute (encode) with `key` over [`ALPHABET_92`].
+/// Non-alphabet bytes (including UTF-8) are preserved; the LCG advances per byte.
 pub fn substitute_92(text: &str, key: u32) -> String {
     let mut state = key;
-    let mut out = String::with_capacity(text.len());
-    for byte in text.bytes() {
-        let rotated = match index_of_92(byte) {
+    let mut out = text.as_bytes().to_vec();
+    for byte in &mut out {
+        *byte = match index_of_92(*byte) {
             Some(index) => {
                 let shift = (draw_lcg23(state) % ALPHABET_92.len() as u16) as usize;
                 ALPHABET_92[(index + shift) % ALPHABET_92.len()]
             }
-            None => byte,
+            None => *byte,
         };
         state = step_lcg23(state);
-        out.push(rotated as char);
     }
-    out
+    String::from_utf8(out).expect("ASCII substitution preserves UTF-8")
 }
 
 /// Undo [`substitute_92`].
 pub fn desubstitute_92(text: &str, key: u32) -> String {
     let mut state = key;
-    let mut out = String::with_capacity(text.len());
-    for byte in text.bytes() {
-        let rotated = match index_of_92(byte) {
+    let mut out = text.as_bytes().to_vec();
+    for byte in &mut out {
+        *byte = match index_of_92(*byte) {
             Some(index) => {
                 let shift = (draw_lcg23(state) % ALPHABET_92.len() as u16) as usize;
                 ALPHABET_92[(index + ALPHABET_92.len() - shift) % ALPHABET_92.len()]
             }
-            None => byte,
+            None => *byte,
         };
         state = step_lcg23(state);
-        out.push(rotated as char);
     }
-    out
+    String::from_utf8(out).expect("ASCII substitution preserves UTF-8")
 }
 
 /// Swap index pairs produced by `count` draws of the 23-bit LCG.
@@ -164,6 +163,27 @@ mod tests {
         let enc = substitute_92(&shuf, 4_000_000);
         let unsub = desubstitute_92(&enc, 4_000_000);
         assert_eq!(unpermute_join(&unsub, ':', 65_914), plain);
+    }
+
+    #[test]
+    fn substitution_preserves_unicode_and_ascii_wire_format() {
+        let text = "café 😀 e\u{301} 中文 : quotes '\"\\\n";
+        for key in [0, 42, 4_000_000, u32::MAX] {
+            let encoded = substitute_92(text, key);
+            assert_eq!(encoded.len(), text.len());
+            assert_eq!(desubstitute_92(&encoded, key), text);
+            let shuffled = permute_join(text, ':', key);
+            assert_eq!(
+                unpermute_join(
+                    &desubstitute_92(&substitute_92(&shuffled, key), key),
+                    ':',
+                    key
+                ),
+                text
+            );
+        }
+        assert_eq!(substitute_92("abc", 0), "aR[");
+        assert_eq!(substitute_92("", 42), "");
     }
 
     #[test]
