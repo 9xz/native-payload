@@ -69,6 +69,46 @@ pub fn desubstitute_92(text: &str, key: u32) -> String {
     String::from_utf8(out).expect("ASCII substitution preserves UTF-8")
 }
 
+/// Substitute over [`ALPHABET_92`], advancing the LCG per UTF-16 code unit,
+/// as in a JavaScript `charAt` loop. Non-alphabet characters are preserved.
+///
+/// BMP characters consume one step; supplementary characters consume two.
+/// Use [`substitute_92`] for protocols that advance per UTF-8 byte instead.
+pub fn substitute_92_utf16(text: &str, key: u32) -> String {
+    substitute_utf16::<false>(text, key)
+}
+
+/// Undo [`substitute_92_utf16`] with the same UTF-16 state progression.
+pub fn desubstitute_92_utf16(text: &str, key: u32) -> String {
+    substitute_utf16::<true>(text, key)
+}
+
+fn substitute_utf16<const INVERSE: bool>(text: &str, key: u32) -> String {
+    let mut state = key;
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        let rotated = if ch.is_ascii()
+            && let Some(index) = index_of_92(ch as u8)
+        {
+            let shift = (draw_lcg23(state) % ALPHABET_92.len() as u16) as usize;
+            let shift = if INVERSE {
+                ALPHABET_92.len() - shift
+            } else {
+                shift
+            };
+            ALPHABET_92[(index + shift) % ALPHABET_92.len()] as char
+        } else {
+            ch
+        };
+        out.push(rotated);
+        state = step_lcg23(state);
+        if ch.len_utf16() == 2 {
+            state = step_lcg23(state);
+        }
+    }
+    out
+}
+
 /// Swap index pairs produced by `count` draws of the 23-bit LCG.
 pub fn swaps_lcg23(count: usize, key: u32) -> Vec<(usize, usize)> {
     let mut pairs = Vec::with_capacity(count);
@@ -184,6 +224,64 @@ mod tests {
         }
         assert_eq!(substitute_92("abc", 0), "aR[");
         assert_eq!(substitute_92("", 42), "");
+    }
+
+    #[test]
+    fn utf16_substitution_matches_javascript_for_bmp_characters() {
+        for (plain, encoded) in [("aéb", "FéP"), ("a\u{301}z", "F\u{301}i")] {
+            assert_eq!(substitute_92_utf16(plain, 4_538_946), encoded);
+            assert_eq!(desubstitute_92_utf16(encoded, 4_538_946), plain);
+        }
+    }
+
+    #[test]
+    fn utf16_substitution_consumes_both_surrogates() {
+        assert_eq!(substitute_92_utf16("a🙂b", 4_538_946), "F🙂Q");
+        assert_eq!(desubstitute_92_utf16("F🙂Q", 4_538_946), "a🙂b");
+    }
+
+    #[test]
+    fn utf16_and_byte_substitution_keep_distinct_contracts() {
+        let plain = "a’b é🙂z";
+        // Fixed outputs from JavaScript UTF-16 and the original byte API.
+        assert_eq!(substitute_92_utf16(plain, 4_538_946), "F’Poé🙂}");
+        assert_eq!(desubstitute_92_utf16("F’Poé🙂}", 4_538_946), plain);
+        assert_eq!(substitute_92(plain, 4_538_946), "F’M6é🙂x");
+        assert_eq!(desubstitute_92("F’M6é🙂x", 4_538_946), plain);
+    }
+
+    #[test]
+    fn utf16_substitution_matches_the_byte_api_for_all_ascii() {
+        let ascii: String = (0..=127).map(char::from).collect();
+        for key in [0, 42, 4_538_946, u32::MAX] {
+            assert_eq!(substitute_92_utf16(&ascii, key), substitute_92(&ascii, key));
+            assert_eq!(
+                desubstitute_92_utf16(&ascii, key),
+                desubstitute_92(&ascii, key)
+            );
+            assert_eq!(substitute_92_utf16("", key), "");
+            assert_eq!(desubstitute_92_utf16("", key), "");
+        }
+    }
+
+    #[test]
+    fn utf16_substitution_preserves_unicode_boundaries_and_roundtrips() {
+        let plain = "\0a\u{7f}\u{80}\u{d7ff}\u{e000}\u{ffff}\u{10000}\u{10ffff}z'\"\\";
+        for key in [0, 42, 4_538_946, u32::MAX] {
+            let encoded = substitute_92_utf16(plain, key);
+            assert_eq!(encoded.len(), plain.len());
+            assert_eq!(desubstitute_92_utf16(&encoded, key), plain);
+            assert_eq!(
+                encoded
+                    .chars()
+                    .filter(|ch| !ch.is_ascii())
+                    .collect::<String>(),
+                plain
+                    .chars()
+                    .filter(|ch| !ch.is_ascii())
+                    .collect::<String>(),
+            );
+        }
     }
 
     #[test]
